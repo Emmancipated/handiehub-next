@@ -1,0 +1,306 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  CUSTOMER
+  SELLER
+  ADMIN
+}
+
+enum ListingKind {
+  PRODUCT
+  SERVICE
+}
+
+enum ListingStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  REJECTED
+  ARCHIVED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  ACCEPTED
+  IN_PROGRESS
+  SHIPPED
+  DELIVERED
+  COMPLETED
+  CANCELLED
+  DISPUTED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  INITIATED
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum LedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+enum LedgerEntryKind {
+  PAYMENT_CAPTURE
+  ESCROW_HOLD
+  ESCROW_RELEASE
+  REFUND
+  PLATFORM_FEE
+  PAYOUT
+  ADJUSTMENT
+}
+
+model User {
+  id                String          @id @default(cuid())
+  email             String          @unique @db.VarChar(320)
+  passwordHash      String
+  firstName         String          @db.VarChar(100)
+  lastName          String          @db.VarChar(100)
+  phone             String?         @db.VarChar(32)
+  roles             UserRole[]      @default([CUSTOMER])
+  emailVerifiedAt   DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  sellerProfile     SellerProfile?
+  listings          Listing[]       @relation("ListingSeller")
+  buyerOrders       Order[]         @relation("OrderBuyer")
+  sellerOrders      Order[]         @relation("OrderSeller")
+  payments          Payment[]
+  ledgerEntries     LedgerEntry[]
+  writtenReviews   Review[]        @relation("ReviewAuthor")
+  receivedReviews  Review[]        @relation("ReviewSeller")
+  addresses        Address[]
+  notifications    Notification[]
+  sentMessages     Message[]       @relation("MessageSender")
+  receivedMessages Message[]       @relation("MessageRecipient")
+
+  // OTP / verification
+  otpHash          String?         @db.VarChar(128)
+  otpExpiresAt     DateTime?
+
+  // Refresh tokens (hashed)
+  refreshTokenHash String?         @db.VarChar(128)
+  refreshTokenExpires DateTime?
+
+  // Refresh-token rotation family. All tokens issued in the same login
+  // session share this value. Reusing a rotated token invalidates the
+  // whole family, which prevents refresh-token theft.
+  refreshTokenFamily String?       @db.VarChar(128)
+
+  // Password reset (OTP-based)
+  passwordResetOtpHash     String?   @db.VarChar(128)
+  passwordResetOtpExpires  DateTime?
+
+  @@index([createdAt])
+}
+
+model SellerProfile {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  businessName   String   @db.VarChar(160)
+  description    String?
+  phoneNumber    String?  @db.VarChar(32)
+  country        String   @default("NG") @db.Char(2)
+  state          String?
+  city           String?
+  verifiedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Category {
+  id          String    @id @default(cuid())
+  slug        String    @unique @db.VarChar(100)
+  name        String    @db.VarChar(120)
+  listings    Listing[]
+  createdAt   DateTime  @default(now())
+
+  @@index([name])
+}
+
+model Listing {
+  id                  String        @id @default(cuid())
+  sellerId            String
+  categoryId          String
+  slug                String        @unique @db.VarChar(180)
+  title               String        @db.VarChar(180)
+  description         String
+  kind                ListingKind
+  status              ListingStatus @default(DRAFT)
+  priceMinor          BigInt
+  currency            String        @default("NGN") @db.Char(3)
+  stockOnHand         Int?
+  serviceDurationMins Int?
+  serviceArea         String?
+  images              String[]      @default([])
+  attributes          Json?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  seller              User          @relation("ListingSeller", fields: [sellerId], references: [id], onDelete: Restrict)
+  category            Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  orderItems          OrderItem[]
+  reviews             Review[]
+
+  @@index([sellerId, status, createdAt])
+  @@index([categoryId, status, createdAt])
+  @@index([kind, status, createdAt])
+}
+
+model Order {
+  id              String       @id @default(cuid())
+  orderNumber     String       @unique @db.VarChar(40)
+  buyerId         String
+  sellerId        String
+  status          OrderStatus  @default(PENDING_PAYMENT)
+  totalMinor      BigInt
+  currency        String       @default("NGN") @db.Char(3)
+  deliveryAddress Json?
+  serviceSchedule DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  buyer           User         @relation("OrderBuyer", fields: [buyerId], references: [id], onDelete: Restrict)
+  seller          User         @relation("OrderSeller", fields: [sellerId], references: [id], onDelete: Restrict)
+  items           OrderItem[]
+  payments        Payment[]
+  ledgerEntries   LedgerEntry[]
+  review          Review?
+
+  @@index([buyerId, createdAt])
+  @@index([sellerId, status, createdAt])
+}
+
+model OrderItem {
+  id               String   @id @default(cuid())
+  orderId          String
+  listingId        String?
+  titleSnapshot    String   @db.VarChar(180)
+  unitPriceMinor   BigInt
+  quantity         Int      @default(1)
+  order            Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  listing          Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  orderId           String
+  userId            String
+  provider          String        @default("paystack") @db.VarChar(40)
+  providerReference String?       @unique @db.VarChar(120)
+  idempotencyKey    String        @unique @db.VarChar(120)
+  status            PaymentStatus @default(INITIATED)
+  amountMinor       BigInt
+  currency          String        @default("NGN") @db.Char(3)
+  verifiedAt        DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  order             Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  user              User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  ledgerEntries     LedgerEntry[]
+
+  @@index([orderId, status])
+  @@index([userId, createdAt])
+}
+
+model LedgerEntry {
+  id             String           @id @default(cuid())
+  userId         String
+  orderId        String?
+  paymentId      String?
+  idempotencyKey String           @unique @db.VarChar(160)
+  kind           LedgerEntryKind
+  direction      LedgerDirection
+  amountMinor    BigInt
+  currency       String           @default("NGN") @db.Char(3)
+  createdAt      DateTime         @default(now())
+  user           User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  order          Order?           @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  payment        Payment?         @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([userId, currency, createdAt])
+  @@index([orderId, kind])
+}
+
+model Review {
+  id         String   @id @default(cuid())
+  orderId    String   @unique
+  listingId  String
+  authorId   String
+  sellerId   String
+  rating     Int
+  comment    String?
+  createdAt  DateTime @default(now())
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  listing    Listing  @relation(fields: [listingId], references: [id], onDelete: Restrict)
+  author     User     @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  seller     User     @relation("ReviewSeller", fields: [sellerId], references: [id], onDelete: Restrict)
+
+  @@index([listingId, createdAt])
+  @@index([sellerId, createdAt])
+}
+
+model Address {
+  id         String   @id @default(cuid())
+  userId     String
+  label      String   @default("home")
+  fullName   String
+  phone      String   @db.VarChar(32)
+  street     String
+  city       String
+  state      String?
+  country    String   @default("NG") @db.Char(2)
+  postalCode String?
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, isDefault])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  type      String   @default("info")
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  readAt    DateTime?
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, isRead])
+}
+
+model Message {
+  id            String   @id @default(cuid())
+  conversationId String
+  senderId      String
+  recipientId   String
+  content       String
+  isRead        Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  readAt        DateTime?
+  sender        User     @relation("MessageSender", fields: [senderId], references: [id], onDelete: Restrict)
+  recipient     User     @relation("MessageRecipient", fields: [recipientId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId])
+  @@index([recipientId])
+  @@index([senderId])
+}

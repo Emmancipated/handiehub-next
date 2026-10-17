@@ -1,0 +1,166 @@
+Here are all the segments/sides of Handiehub as currently built:
+
+User Sides / Roles
+Customer — buys products/services, places orders, pays, leaves reviews
+Handieman / Seller — lists products/services, receives orders, gets paid via escrow
+Admin — (defined in schema UserRole.ADMIN, routes under /api/admin)
+
+Auth Flow
+Signup type selection (Customer vs Handieman)
+Signup details (email, password, name, phone, country)
+Login
+Email verification
+Logout / session (hh_session cookie)
+Current user profile (/api/auth/me)
+
+Product / Listing Flow
+Browse listings (homepage featured + search)
+Categories & category pages
+Product detail page
+Create listing (seller only) — draft status
+Listing CRUD (update, delete)
+Featured listings, seller's own listings
+
+Order Flow
+Create order from product detail (POST /api/orders)
+Order list/tracking (my orders)
+Order status: PENDING_PAYMENT → PAID → ACCEPTED → IN_PROGRESS → SHIPPED → DELIVERED → COMPLETED
+Order stats/overview (admin)
+
+Payment Flow (Paystack)
+Initialize payment (POST /api/payments/initialize)
+Verify payment (GET /api/payments/verify)
+Paystack webhook (charge.success / charge.failed)
+Checkout success/failed pages
+
+Wallet / Ledger (Escrow)
+Payment capture → escrow hold (seller funds held)
+Ledger entries: PAYMENT_CAPTURE, ESCROW_HOLD, ESCROW_RELEASE, REFUND, PLATFORM_FEE, PAYOUT, ADJUSTMENT
+Available balance vs escrow balance
+
+Reviews
+Leave review on delivered orders (one review per order)
+Seller reviews & ratings
+
+Addresses
+User delivery addresses (default address support)
+
+Notifications
+User notifications (read/unread)
+
+Messages / Chat
+Conversations between buyer & seller
+Message list with unread counts
+
+API Route Summary (app/api/)
+Route	Purpose
+/api/health	Health check
+/api/auth/*	signup, login, logout, me
+/api/listings	CRUD + search + categories
+/api/orders	Create + list orders
+/api/orders/[id]	Single order
+/api/orders/[id]/confirm-delivery	Confirm delivery
+/api/payments/initialize	Paystack init
+/api/payments/verify	Paystack verify
+/api/payments/webhook	Paystack webhook
+/api/users	User profile/stats
+/api/wallet	Wallet balance
+/api/reviews	Reviews
+/api/addresses	Addresses
+/api/notifications	Notifications
+/api/messages	Chat messages
+/api/admin	Admin routes
+
+Pages (app/(app)/)
+Home, Categories, Category detail, Handieman (pros), Seller profile, Product detail, Checkout payment, Order, Wallet, Chat, User profile, Edit profile
+
+Auth Pages (app/(auth)/)
+Login, Signup (type pick), Signup details, Verification
+The shell layout (ShellLayout) provides the top nav + bottom mobile tab bar (Home, Order, Chat, Wallet, Profile).
+
+
+
+
+
+
+
+
+Here's the complete frontend inventory, organized by section:
+
+Layout & Shell (shared UI)
+File	What it does
+app/layout.tsx	Root layout — fonts, metadata, <html>/<body> shell
+app/(app)/layout.tsx	Route-group layout for the main app — wraps every /(app) page in ShellLayout
+app/(auth)/layout.tsx	Layout for auth pages (no shell nav — just the auth form wrapper)
+components/layout/ShellLayout.tsx	Shared chrome: top nav bar (logo, Home/Categories/Handiemen links, cart, profile, Sign In) + bottom mobile tab bar (Home, Order, Chat, Wallet, Profile)
+
+🔐 Auth Side (app/(auth)/)
+Page	What it does
+signup/page.tsx	Account-type picker — choose "Join as a User" (customer) or "Join as a Handieman" (seller), then proceeds
+signup/details/page.tsx	Two-step registration form: email, password, first/last name, phone, country → calls POST /api/auth/signup
+login/page.tsx	Login form (email + password, remember me, user/handieman toggle) → calls POST /api/auth/login
+verification/page.tsx	Email verification page after signup
+Auth API (app/api/auth/): signup, login, logout, me routes — cookie-based JWT session (hh_session).
+
+🛒 Customer / Buyer Side (app/(app)/)
+Page	What it does
+page.tsx (home)	Landing page — hero, search bar, popular categories, featured products, testimonials, CTA. Fetches listings from GET /api/listings
+categories/page.tsx	Browse all categories
+category/[id]/page.tsx	Listings within a specific category
+product/[slug]/page.tsx	Product detail — images, price, description, seller info, quantity picker, "Buy Now"/"Add to Cart". Creates order via POST /api/orders
+checkout/payment/page.tsx	Checkout flow — init → Paystack redirect → success/failed states. Calls POST /api/payments/initialize + GET /api/payments/verify
+order/page.tsx	My orders — list + filter by status (all/pending/delivered/cancelled), order totals, items, "Leave a Review" link. Fetches GET /api/orders
+wallet/page.tsx	Wallet — available vs escrow balance, transaction history tabs
+
+🛠️ Handieman / Seller Side (app/(app)/)
+Page	What it does
+handieman/page.tsx	Browse all available handiemen/pros with search + filter chips
+seller/[id]/page.tsx	Seller storefront — cover image, about, contact (WhatsApp/phone), stats, tabs: Overview / Products / Reviews
+user/profile/page.tsx	User's own profile — personal info, activity feed (orders), settings
+user/edit-profile/page.tsx	Edit profile details
+
+💬 Communication & Support (app/(app)/)
+Page	What it does
+chat/page.tsx	Chat — conversation list + message thread with a selected seller/buyer
+
+📡 API Routes (app/api/) — backend the frontend calls
+Route group	Routes	Purpose
+Health	health	Health check
+Auth	auth/login, auth/logout, auth/me, auth/signup	Session auth
+Listings	listings, listings/[id], listings/[id]/related, listings/categories, listings/categories/featured, listings/category/[category], listings/search, listings/seller/[sellerId]	Listing CRUD, search, categories, featured
+Orders	orders, orders/[id], orders/[id]/confirm-delivery, orders/my-orders, orders/overview/stats, orders/seller-orders	Order lifecycle
+Payments	payments/initialize, payments/verify, payments/webhook, webhook/paystack	Paystack init/verify/webhook
+Wallet	wallet/balance, wallet/escrow-transactions, wallet/process-releases, wallet/summary, wallet/transactions	Wallet + escrow ledger
+Users	users/[id], users/me, users/me/stats	Profiles + stats
+Reviews	reviews	Product/seller reviews
+Addresses	addresses, addresses/[id]	Delivery addresses
+Notifications	notifications, notifications/[id]	User notifications
+Messages	messages	Chat messages
+Admin	admin/orders, admin/orders/failed, admin/stats, admin/users, admin/users/[id]	Admin dashboard
+Lib (shared utilities)
+File	What it does
+lib/db/prisma.ts	Prisma client (PostgreSQL)
+lib/auth/password.ts	bcrypt hash/compare
+lib/auth/jwt.ts	sign/verify JWT
+lib/auth/session.ts	build/clear session cookie
+lib/auth/current-user.ts	requireUserId() guard + AuthError
+lib/paystack/paystack.ts	Paystack API client (init, verify, signature check)
+lib/listing/slug.ts	uniqueSlug() helper
+
+The four "sides" in one line:
+Customer — browse, buy, pay, track orders, wallet, chat, profile
+Handieman / Seller — list products, storefront, seller orders, wallet releases
+Auth — signup/login/verification/session (shared entry point)
+Admin — orders stats, user management (backend API + admin UI routes exist)
+All 15 tests pass, and the pages now call the Next.js API routes (no more mock data for listings/orders).
+
+70.5 t/s
+
+
+
+
+
+
+
+
+
