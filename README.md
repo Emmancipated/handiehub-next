@@ -33,4 +33,4 @@ Set `DATABASE_URL` in local `.env` and in the deployment environment. Use a pool
 - Treat payment-provider events as untrusted until their signatures and transaction state are verified. Make payment and ledger operations idempotent.
 - Store money as integer minor units. Convert `BigInt` values to strings at JSON boundaries.
 - Run scheduled and retryable work in a durable worker or platform scheduler, not an in-memory timer inside a serverless function.
-- Use `npm run build` before deployment. Vercel must have `DATABASE_URL` configured for build and runtime.
+- Use `npm run build` before deployment. Vercel must have `DATABASE_URL` configured for build and runtime..
