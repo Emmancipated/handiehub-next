@@ -31,8 +31,8 @@ export async function GET(req: Request) {
 
     const { searchParams } = new URL(req.url);
     const parsed = adminQuerySchema.parse({
-      page: searchParams.get("page"),
-      limit: searchParams.get("limit"),
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
     });
 
     const { page, limit } = parsed;
@@ -68,7 +68,10 @@ export async function GET(req: Request) {
     });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }

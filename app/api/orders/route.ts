@@ -1,23 +1,33 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
+import { requireUserId, requireVerifiedUser } from "@/lib/auth/current-user";
 import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
 
 const orderItemSchema = z.object({
-  listingId: z.string().optional().nullable(),
-  titleSnapshot: z.string().min(1).max(180),
-  unitPriceMinor: z.string().transform((val) => BigInt(val)),
-  quantity: z.coerce.number().int().positive().default(1),
+  listingId: z.string().min(1),
+  quantity: z.coerce.number().int().positive().max(50).default(1),
 });
 
 const createOrderSchema = z.object({
-  sellerId: z.string().min(1),
-  items: z.array(orderItemSchema).min(1),
-  currency: z.string().length(3).default("NGN"),
+  sellerId: z.string().min(1).optional(),
+  items: z.array(orderItemSchema).min(1).max(20),
+  currency: z.string().length(3).optional(),
   deliveryAddress: z.record(z.string(), z.unknown()).optional().nullable(),
   serviceSchedule: z.coerce.date().optional().nullable(),
 });
+
+class OrderValidationError extends Error {
+  status: number;
+  code: string;
+
+  constructor(message: string, status = 400, code = "ORDER_INVALID") {
+    super(message);
+    this.name = "OrderValidationError";
+    this.status = status;
+    this.code = code;
+  }
+}
 
 function generateOrderNumber(): string {
   const ts = Date.now().toString(36).toUpperCase();
@@ -27,104 +37,230 @@ function generateOrderNumber(): string {
 
 export async function POST(req: Request) {
   try {
-    const buyerId = await requireUserId();
+    const buyerId = await requireVerifiedUser();
 
     const body = await req.json();
     const data = createOrderSchema.parse(body);
 
+    const listingIds = data.items.map((item) => item.listingId);
+    if (new Set(listingIds).size !== listingIds.length) {
+      return NextResponse.json(
+        { error: "Each listing can only appear once per order" },
+        { status: 400 },
+      );
+    }
+
+    const listings = await prisma.listing.findMany({
+      where: { id: { in: listingIds } },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        sellerId: true,
+        kind: true,
+        priceMinor: true,
+        currency: true,
+        stockOnHand: true,
+      },
+    });
+
+    if (listings.length !== listingIds.length) {
+      return NextResponse.json(
+        { error: "One or more listings are no longer available" },
+        { status: 400 },
+      );
+    }
+
+    const listingById = new Map(listings.map((listing) => [listing.id, listing]));
+    const first = listingById.get(listingIds[0]);
+
+    if (!first) {
+      return NextResponse.json({ error: "Listing not found" }, { status: 404 });
+    }
+
+    if (listings.some((listing) => listing.status !== "ACTIVE")) {
+      return NextResponse.json(
+        { error: "One or more listings are not available" },
+        { status: 400 },
+      );
+    }
+
+    if (listings.some((listing) => listing.sellerId !== first.sellerId)) {
+      return NextResponse.json(
+        { error: "All items in an order must come from the same seller" },
+        { status: 400 },
+      );
+    }
+
+    if (listings.some((listing) => listing.kind !== first.kind)) {
+      return NextResponse.json(
+        { error: "Products and services cannot be mixed in one order" },
+        { status: 400 },
+      );
+    }
+
+    if (listings.some((listing) => listing.currency !== first.currency)) {
+      return NextResponse.json(
+        { error: "All items in an order must use the same currency" },
+        { status: 400 },
+      );
+    }
+
+    if (data.sellerId && data.sellerId !== first.sellerId) {
+      return NextResponse.json(
+        { error: "Seller does not match the selected listings" },
+        { status: 400 },
+      );
+    }
+
+    if (first.sellerId === buyerId) {
+      return NextResponse.json(
+        { error: "Cannot buy from yourself" },
+        { status: 400 },
+      );
+    }
+
     const seller = await prisma.user.findUnique({
-      where: { id: data.sellerId },
+      where: { id: first.sellerId },
       select: { id: true, roles: true },
     });
     if (!seller || !seller.roles.includes("SELLER")) {
       return NextResponse.json({ error: "Seller not found" }, { status: 404 });
     }
 
-    if (seller.id === buyerId) {
-      return NextResponse.json({ error: "Cannot buy from yourself" }, { status: 400 });
+    if (first.kind === "SERVICE") {
+      if (!data.serviceSchedule) {
+        return NextResponse.json(
+          { error: "Choose a date and time for this service" },
+          { status: 400 },
+        );
+      }
+      if (data.serviceSchedule.getTime() <= Date.now()) {
+        return NextResponse.json(
+          { error: "Choose a future date and time for this service" },
+          { status: 400 },
+        );
+      }
     }
 
-    let totalMinor = BigInt(0);
-    const itemsWithListing: Array<{
-      listingId: string | null | undefined;
-      titleSnapshot: string;
-      unitPriceMinor: bigint;
-      quantity: number;
-    }> = [];
+    const pricedItems = data.items.map((item) => {
+      const listing = listingById.get(item.listingId)!;
+      if (
+        listing.kind === "PRODUCT" &&
+        listing.stockOnHand !== null &&
+        item.quantity > listing.stockOnHand
+      ) {
+        throw new OrderValidationError(
+          `Only ${listing.stockOnHand} of ${listing.title} left in stock`,
+          409,
+          "STOCK_UNAVAILABLE",
+        );
+      }
+      return {
+        listingId: listing.id,
+        titleSnapshot: listing.title,
+        unitPriceMinor: listing.priceMinor,
+        quantity: item.quantity,
+        stockOnHand: listing.stockOnHand,
+        kind: listing.kind,
+      };
+    });
 
-    for (const item of data.items) {
-      let listing = null;
-      if (item.listingId) {
-        listing = await prisma.listing.findUnique({
-          where: { id: item.listingId },
-          select: { id: true, title: true, status: true, sellerId: true },
+    // Prices, titles and the seller are derived from the database, never from
+    // the request body, so a tampered client cannot underpay an order.
+    const totalMinor = pricedItems.reduce(
+      (sum, item) => sum + item.unitPriceMinor * BigInt(item.quantity),
+      BigInt(0),
+    );
+    const currency = first.currency;
+    const orderNumber = generateOrderNumber();
+
+    const order = await prisma.$transaction(async (tx) => {
+      for (const item of pricedItems) {
+        if (item.kind !== "PRODUCT" || item.stockOnHand === null) continue;
+
+        // Conditional decrement closes the race between the check above and
+        // another buyer purchasing the last unit.
+        const decremented = await tx.listing.updateMany({
+          where: {
+            id: item.listingId,
+            stockOnHand: { gte: item.quantity },
+          },
+          data: { stockOnHand: { decrement: item.quantity } },
         });
-        if (!listing || listing.status !== "ACTIVE") {
-          return NextResponse.json(
-            { error: `Listing ${item.listingId} not available` },
-            { status: 400 },
-          );
-        }
-        if (listing.sellerId !== data.sellerId) {
-          return NextResponse.json(
-            { error: `Listing ${item.listingId} does not belong to seller` },
-            { status: 400 },
+
+        if (decremented.count !== 1) {
+          throw new OrderValidationError(
+            `${item.titleSnapshot} just went out of stock`,
+            409,
+            "STOCK_UNAVAILABLE",
           );
         }
       }
 
-      totalMinor += item.unitPriceMinor * BigInt(item.quantity);
-      itemsWithListing.push({
-        listingId: item.listingId,
-        titleSnapshot: item.titleSnapshot,
-        unitPriceMinor: item.unitPriceMinor,
-        quantity: item.quantity,
-      });
-    }
-
-    const orderNumber = generateOrderNumber();
-
-    const order = await prisma.order.create({
-      data: {
-        orderNumber,
-        buyerId,
-        sellerId: data.sellerId,
-        status: "PENDING_PAYMENT",
-        totalMinor,
-        currency: data.currency,
-        ...(data.deliveryAddress !== undefined
-          ? {
-              deliveryAddress: data.deliveryAddress as unknown as Parameters<
-                typeof prisma.order.create
-              >[0]["data"]["deliveryAddress"],
-            }
-          : {}),
-        serviceSchedule: data.serviceSchedule ?? null,
-        items: {
-          create: itemsWithListing.map((item) => ({
-            listingId: item.listingId ?? undefined,
-            titleSnapshot: item.titleSnapshot,
-            unitPriceMinor: item.unitPriceMinor,
-            quantity: item.quantity,
-          })),
+      return tx.order.create({
+        data: {
+          orderNumber,
+          buyerId,
+          sellerId: first.sellerId,
+          status: "PENDING_PAYMENT",
+          totalMinor,
+          currency,
+          ...(data.deliveryAddress !== undefined
+            ? {
+                deliveryAddress: data.deliveryAddress as unknown as Parameters<
+                  typeof prisma.order.create
+                >[0]["data"]["deliveryAddress"],
+              }
+            : {}),
+          serviceSchedule:
+            first.kind === "SERVICE" ? data.serviceSchedule ?? null : null,
+          items: {
+            create: pricedItems.map((item) => ({
+              listingId: item.listingId,
+              titleSnapshot: item.titleSnapshot,
+              unitPriceMinor: item.unitPriceMinor,
+              quantity: item.quantity,
+            })),
+          },
         },
-      },
-      include: {
-        items: true,
-        buyer: { select: { id: true, firstName: true, lastName: true, email: true } },
-        seller: { select: { id: true, firstName: true, lastName: true, email: true } },
-      },
+        include: {
+          items: true,
+          buyer: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+          seller: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+        },
+      });
     });
 
     return NextResponse.json({ order }, { status: 201 });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
+    }
+    if (error instanceof OrderValidationError) {
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
-      return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
+      return NextResponse.json(
+        { error: "Validation failed", issues: error.issues },
+        { status: 400 },
+      );
     }
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    console.error("Create order error:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
   }
 }
 
@@ -153,8 +289,8 @@ export async function GET(req: Request) {
 
     const { searchParams } = new URL(req.url);
     const parsed = orderQuerySchema.parse({
-      page: searchParams.get("page"),
-      limit: searchParams.get("limit"),
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
       status: searchParams.get("status"),
       buyerId: searchParams.get("buyerId"),
       sellerId: searchParams.get("sellerId"),
@@ -191,6 +327,7 @@ export async function GET(req: Request) {
         take: limit,
         include: {
           items: true,
+          review: { select: { id: true } },
           buyer: { select: { id: true, firstName: true, lastName: true } },
           seller: { select: { id: true, firstName: true, lastName: true } },
         },
@@ -204,7 +341,10 @@ export async function GET(req: Request) {
     });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });

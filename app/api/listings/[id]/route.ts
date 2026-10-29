@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
+import { getOptionalUserId, requireVerifiedUser } from "@/lib/auth/current-user";
 import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
 import { uniqueSlug } from "@/lib/listing/slug";
+import { isSellerProfileComplete } from "@/lib/seller/profile";
+import { toJsonPayload } from "@/lib/http/toJsonPayload";
+import { getListingRatings, withListingRatings } from "@/lib/listing/query";
 
 const updateListingSchema = z.object({
   title: z.string().min(1).max(180).optional(),
@@ -25,15 +28,16 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    await requireUserId();
+    // Public read. A session only matters for viewing non-active listings.
+    const userId = await getOptionalUserId();
 
     const { id } = await params;
 
-    const listing = await prisma.listing.findUnique({
-      where: { id },
+    const listing = await prisma.listing.findFirst({
+      where: { OR: [{ id }, { slug: id }] },
       include: {
         category: { select: { id: true, name: true, slug: true } },
-        seller: { select: { id: true, firstName: true, lastName: true, email: true } },
+        seller: { select: { id: true, firstName: true, lastName: true } },
       },
     });
 
@@ -41,10 +45,41 @@ export async function GET(
       return NextResponse.json({ error: "Listing not found" }, { status: 404 });
     }
 
-    return NextResponse.json({ listing });
+    if (listing.status !== "ACTIVE") {
+      // Drafts/rejected listings are only visible to their owner or an admin.
+      let allowed = false;
+      if (userId) {
+        if (listing.sellerId === userId) {
+          allowed = true;
+        } else {
+          const roles =
+            (
+              await prisma.user.findUnique({
+                where: { id: userId },
+                select: { roles: true },
+              })
+            )?.roles ?? [];
+          allowed = roles.includes("ADMIN");
+        }
+      }
+      if (!allowed) {
+        return NextResponse.json(
+          { error: "Listing not found" },
+          { status: 404 },
+        );
+      }
+    }
+
+    const ratings = await getListingRatings([listing.id]);
+    const [listingWithRating] = withListingRatings([listing], ratings);
+
+    return NextResponse.json(toJsonPayload({ listing: listingWithRating }));
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
@@ -55,7 +90,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const userId = await requireUserId();
+    const userId = await requireVerifiedUser();
 
     const { id } = await params;
 
@@ -79,6 +114,35 @@ export async function PATCH(
 
     const body = await req.json();
     const data = updateListingSchema.parse(body);
+
+    // A seller cannot publish (or submit for review) until onboarding is done.
+    if (
+      existing.sellerId === userId &&
+      (data.status === "ACTIVE" || data.status === "PENDING_REVIEW")
+    ) {
+      const sellerProfile = await prisma.sellerProfile.findUnique({
+        where: { userId },
+        select: {
+          businessName: true,
+          phoneNumber: true,
+          country: true,
+          state: true,
+          city: true,
+          address: true,
+          professions: true,
+          skills: true,
+        },
+      });
+      if (!isSellerProfileComplete(sellerProfile)) {
+        return NextResponse.json(
+          {
+            error: "Complete your seller profile before publishing listings",
+            code: "SELLER_PROFILE_INCOMPLETE",
+          },
+          { status: 403 },
+        );
+      }
+    }
 
     const updateData: Record<string, unknown> = { ...data };
 
@@ -106,7 +170,10 @@ export async function PATCH(
     return NextResponse.json({ listing });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
@@ -120,7 +187,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const userId = await requireUserId();
+    const userId = await requireVerifiedUser();
 
     const { id } = await params;
 
@@ -147,7 +214,10 @@ export async function DELETE(
     return NextResponse.json({ message: "Listing deleted successfully" });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }

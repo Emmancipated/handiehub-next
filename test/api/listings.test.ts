@@ -16,10 +16,20 @@ const mockCategory = {
   findUnique: jest.fn(),
 };
 
+const mockSellerProfile = {
+  findUnique: jest.fn(),
+};
+
+const mockReview = {
+  groupBy: jest.fn(),
+};
+
 const mockPrisma = {
   listing: mockListing,
   user: mockUser,
   category: mockCategory,
+  sellerProfile: mockSellerProfile,
+  review: mockReview,
 };
 
 jest.mock("@/lib/db/prisma", () => ({ prisma: mockPrisma }));
@@ -38,6 +48,9 @@ jest.mock("next/server", () => ({
 
 jest.mock("@/lib/auth/current-user", () => ({
   requireUserId: jest.fn(() => Promise.resolve("user_1")),
+  getOptionalUserId: jest.fn(() => Promise.resolve("user_1")),
+  getOptionalUser: jest.fn(() => Promise.resolve({ sub: "user_1" })),
+  requireVerifiedUser: jest.fn(() => Promise.resolve("user_1")),
   AuthError: class extends Error {
     status = 401;
   },
@@ -50,6 +63,7 @@ describe("GET /api/listings", () => {
     jest.clearAllMocks();
     nextResponseJson.mockClear();
     mockUser.findUnique.mockResolvedValue({ id: "user_1", roles: ["CUSTOMER"] });
+    mockReview.groupBy.mockResolvedValue([]);
   });
 
   it("returns active listings with pagination", async () => {
@@ -80,12 +94,59 @@ describe("GET /api/listings", () => {
       undefined,
     );
   });
+
+  it("serves the feed to anonymous visitors", async () => {
+    const { getOptionalUserId } = require("@/lib/auth/current-user");
+    getOptionalUserId.mockResolvedValueOnce(null);
+    mockListing.findMany.mockResolvedValue([]);
+    mockListing.count.mockResolvedValue(0);
+
+    const req = { url: "http://localhost/api/listings" } as any;
+    await listingsGet(req);
+
+    expect(mockListing.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: "ACTIVE" }),
+      }),
+    );
+    expect(nextResponseJson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        listings: [],
+        pagination: expect.objectContaining({ page: 1, total: 0 }),
+      }),
+      undefined,
+    );
+  });
+
+  it("applies a sort clause to the feed", async () => {
+    mockListing.findMany.mockResolvedValue([]);
+    mockListing.count.mockResolvedValue(0);
+
+    const req = {
+      url: "http://localhost/api/listings?sort=price-asc",
+    } as any;
+    await listingsGet(req);
+
+    expect(mockListing.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: { priceMinor: "asc" } }),
+    );
+  });
 });
 
 describe("POST /api/listings", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     nextResponseJson.mockClear();
+    mockSellerProfile.findUnique.mockResolvedValue({
+      businessName: "Fixit Ltd",
+      phoneNumber: "+2348000000000",
+      country: "NG",
+      state: "Lagos",
+      city: "Ikeja",
+      address: "1 Test Street",
+      professions: ["Plumbing"],
+      skills: ["Pipe repair"],
+    });
   });
 
   it("creates a listing for a seller", async () => {
@@ -146,6 +207,29 @@ describe("POST /api/listings", () => {
 
     expect(nextResponseJson).toHaveBeenCalledWith(
       { error: "Only registered sellers can create listings" },
+      { status: 403 },
+    );
+  });
+
+  it("blocks a seller with an incomplete profile", async () => {
+    mockUser.findUnique.mockResolvedValue({ id: "user_1", roles: ["SELLER"] });
+    mockSellerProfile.findUnique.mockResolvedValue(null);
+
+    const req = {
+      json: jest.fn().mockResolvedValue({
+        title: "Test Product",
+        description: "A test product",
+        categoryId: "cat_1",
+        kind: "PRODUCT",
+        priceMinor: "5000",
+      }),
+    } as any;
+
+    await listingsPost(req);
+
+    expect(mockListing.create).not.toHaveBeenCalled();
+    expect(nextResponseJson).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "SELLER_PROFILE_INCOMPLETE" }),
       { status: 403 },
     );
   });

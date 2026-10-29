@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
+import { requireVerifiedUser } from "@/lib/auth/current-user";
 import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { initializePayment, PaystackError } from "@/lib/paystack/paystack";
@@ -11,7 +11,7 @@ const initializeSchema = z.object({
 
 export async function POST(req: Request) {
   try {
-    const userId = await requireUserId();
+    const userId = await requireVerifiedUser();
 
     const body = await req.json();
     const data = initializeSchema.parse(body);
@@ -46,6 +46,31 @@ export async function POST(req: Request) {
       );
     }
 
+    const alreadyPaid = await prisma.payment.findFirst({
+      where: { orderId: order.id, status: "SUCCEEDED" },
+      select: { id: true },
+    });
+    if (alreadyPaid) {
+      return NextResponse.json(
+        {
+          error: "This order has already been paid.",
+          code: "ORDER_ALREADY_PAID",
+        },
+        { status: 409 },
+      );
+    }
+
+    const buyer = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    if (!buyer?.email) {
+      return NextResponse.json(
+        { error: "A verified email is required to pay" },
+        { status: 400 },
+      );
+    }
+
     const idempotencyKey = `pay-${order.id}-${Date.now()}`;
 
     const payment = await prisma.payment.create({
@@ -60,10 +85,16 @@ export async function POST(req: Request) {
       },
     });
 
+    const appUrl = (process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin).replace(
+      /\/$/,
+      "",
+    );
+
     const paystack = await initializePayment({
-      email: "", // Will be filled from user profile in production
+      email: buyer.email,
       amount: Number(order.totalMinor),
       reference: idempotencyKey,
+      callbackUrl: `${appUrl}/checkout/payment?orderId=${order.id}`,
       metadata: {
         orderId: order.id,
         paymentId: payment.id,
@@ -93,7 +124,10 @@ export async function POST(req: Request) {
     });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof PaystackError) {
       return NextResponse.json(
