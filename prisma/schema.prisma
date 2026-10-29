@@ -85,25 +85,40 @@ model User {
   notifications    Notification[]
   sentMessages     Message[]       @relation("MessageSender")
   receivedMessages Message[]       @relation("MessageRecipient")
+  refreshTokens    RefreshToken[]
+  savedListings    SavedListing[]
+  notificationPreference NotificationPreference?
 
   // OTP / verification
   otpHash          String?         @db.VarChar(128)
   otpExpiresAt     DateTime?
-
-  // Refresh tokens (hashed)
-  refreshTokenHash String?         @db.VarChar(128)
-  refreshTokenExpires DateTime?
-
-  // Refresh-token rotation family. All tokens issued in the same login
-  // session share this value. Reusing a rotated token invalidates the
-  // whole family, which prevents refresh-token theft.
-  refreshTokenFamily String?       @db.VarChar(128)
 
   // Password reset (OTP-based)
   passwordResetOtpHash     String?   @db.VarChar(128)
   passwordResetOtpExpires  DateTime?
 
   @@index([createdAt])
+}
+
+/// Refresh tokens are stored hashed and rotated on every use. Tokens issued
+/// from the same login session share a family; reusing a revoked token
+/// invalidates the whole family.
+model RefreshToken {
+  id                  String    @id @default(cuid())
+  userId              String
+  tokenHash           String    @unique @db.VarChar(128)
+  familyId            String    @db.VarChar(128)
+  expiresAt           DateTime
+  revokedAt           DateTime?
+  replacedByTokenHash String?   @db.VarChar(128)
+  userAgent           String?   @db.VarChar(512)
+  ip                  String?   @db.VarChar(64)
+  createdAt           DateTime  @default(now())
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
 }
 
 model SellerProfile {
@@ -115,20 +130,40 @@ model SellerProfile {
   country        String   @default("NG") @db.Char(2)
   state          String?
   city           String?
+  address        String?
+  avatarUrl      String?  @db.VarChar(500)
+  professions    String[] @default([])
+  skills         String[] @default([])
+  productsImageUrl String[] @default([])
+  responseTime   String?  @db.VarChar(80)
+  intraStateDeliveryMinMinutes Int?
+  intraStateDeliveryMaxMinutes Int?
+  interStateDeliveryMinMinutes Int?
+  interStateDeliveryMaxMinutes Int?
+  isVerified     Boolean  @default(false)
+  isFeatured     Boolean  @default(false)
+  isTopSeller    Boolean  @default(false)
   verifiedAt     DateTime?
+  onboardingCompletedAt DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([onboardingCompletedAt])
 }
 
 model Category {
   id          String    @id @default(cuid())
   slug        String    @unique @db.VarChar(100)
   name        String    @db.VarChar(120)
+  parentId    String?
+  parent      Category? @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children    Category[] @relation("CategoryHierarchy")
   listings    Listing[]
   createdAt   DateTime  @default(now())
 
   @@index([name])
+  @@index([parentId])
 }
 
 model Listing {
@@ -153,6 +188,7 @@ model Listing {
   category            Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   orderItems          OrderItem[]
   reviews             Review[]
+  savedBy             SavedListing[]
 
   @@index([sellerId, status, createdAt])
   @@index([categoryId, status, createdAt])
@@ -169,6 +205,9 @@ model Order {
   currency        String       @default("NGN") @db.Char(3)
   deliveryAddress Json?
   serviceSchedule DateTime?
+  deliveryCode    String?      @db.VarChar(12)
+  deliveryCodeExpiresAt DateTime?
+  deliveryCodeAttempts  Int      @default(0)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   buyer           User         @relation("OrderBuyer", fields: [buyerId], references: [id], onDelete: Restrict)
@@ -303,4 +342,40 @@ model Message {
   @@index([conversationId])
   @@index([recipientId])
   @@index([senderId])
+}
+
+// Fixed-window counters backing the abuse protection in
+// lib/security/rateLimit.ts. `key` is namespaced per action + identifier.
+model RateLimit {
+  key       String   @id @db.VarChar(255)
+  count     Int      @default(0)
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+/// Customer wishlist. A user can save a listing once; the unique constraint
+/// makes the toggle endpoint idempotent.
+model SavedListing {
+  id        String   @id @default(cuid())
+  userId    String
+  listingId String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, listingId])
+  @@index([userId, createdAt])
+  @@index([listingId])
+}
+
+/// Email and push preferences. One row per user, created lazily with defaults.
+model NotificationPreference {
+  userId              String   @id
+  emailOrderUpdates   Boolean  @default(true)
+  emailMessages       Boolean  @default(true)
+  emailMarketing      Boolean  @default(false)
+  pushEnabled         Boolean  @default(false)
+  updatedAt           DateTime @updatedAt
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

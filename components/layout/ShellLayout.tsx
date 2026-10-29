@@ -2,10 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { useAuth } from "@/components/auth/AuthProvider";
 import Link from "next/link";
 import {
   Home,
   ShoppingBag,
+  ShoppingCart,
   MessageSquare,
   Wallet,
   User,
@@ -13,11 +15,12 @@ import {
   Search,
   Menu,
 } from "lucide-react";
+import { CART_CHANGED_EVENT, readCart } from "@/lib/cart/storage";
 
 const MOBILE_TABS = [
   { name: "Home", href: "/", icon: Home, label: "Explore" },
-  { name: "Order", href: "/order", icon: ShoppingBag, label: "Orders" },
-  { name: "Chat", href: "/chat", icon: MessageSquare, label: "Messages" },
+  { name: "Order", href: "/dashboard/customer/orders", icon: ShoppingBag, label: "Orders" },
+  { name: "Chat", href: "/messages", icon: MessageSquare, label: "Messages" },
   { name: "Wallet", href: "/wallet", icon: Wallet, label: "Wallet" },
   { name: "Profile", href: "/user/profile", icon: User, label: "Profile" },
 ];
@@ -34,12 +37,55 @@ export default function ShellLayout({
   children: React.ReactNode;
 }) {
   const [mounted, setMounted] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [cartCount, setCartCount] = useState(0);
   const pathname = usePathname();
   const router = useRouter();
+  const { user, logout } = useAuth();
 
   useEffect(() => {
+    // Hydration guard: auth state is only known on the client.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    const syncCart = () =>
+      setCartCount(readCart().reduce((sum, item) => sum + item.quantity, 0));
+
+    syncCart();
+    window.addEventListener(CART_CHANGED_EVENT, syncCart);
+    window.addEventListener("storage", syncCart);
+    return () => {
+      window.removeEventListener(CART_CHANGED_EVENT, syncCart);
+      window.removeEventListener("storage", syncCart);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setUnreadCount(0);
+      return;
+    }
+
+    let active = true;
+    fetch("/api/notifications?isRead=false&limit=1", {
+      credentials: "same-origin",
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (active) setUnreadCount(data?.unreadCount ?? 0);
+      })
+      .catch(() => {
+        /* the badge is optional */
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [user]);
 
   if (!mounted) {
     return null;
@@ -89,26 +135,86 @@ export default function ShellLayout({
               <button className="p-2 text-gray-500 hover:text-[#5B48FC] hover:bg-[#EFEDFF] rounded-full transition-all">
                 <Search className="w-5 h-5" />
               </button>
-              <button className="relative p-2 text-gray-500 hover:text-[#5B48FC] hover:bg-[#EFEDFF] rounded-full transition-all">
+              <Link
+                href="/checkout"
+                aria-label="Cart"
+                className="relative p-2 text-gray-500 hover:text-[#5B48FC] hover:bg-[#EFEDFF] rounded-full transition-all"
+              >
+                <ShoppingCart className="w-5 h-5" />
+                {cartCount > 0 && (
+                  <span className="absolute top-1 right-1 min-w-4 h-4 px-1 bg-[#5B48FC] text-white text-[9px] font-bold rounded-full border-2 border-white flex items-center justify-center">
+                    {cartCount > 9 ? "9+" : cartCount}
+                  </span>
+                )}
+              </Link>
+              <Link
+                href="/notifications"
+                aria-label="Notifications"
+                className="relative p-2 text-gray-500 hover:text-[#5B48FC] hover:bg-[#EFEDFF] rounded-full transition-all"
+              >
                 <Bell className="w-5 h-5" />
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></span>
-              </button>
+                {unreadCount > 0 && (
+                  <span className="absolute top-1 right-1 min-w-4 h-4 px-1 bg-red-500 text-white text-[9px] font-bold rounded-full border-2 border-white flex items-center justify-center">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
+              </Link>
             </div>
 
             {/* Auth Buttons (Desktop) */}
             <div className="hidden md:flex items-center gap-3">
-              <Link
-                href="/auth/login"
-                className="text-sm font-semibold text-gray-700 hover:text-[#5B48FC] px-4 py-2 transition-colors"
-              >
-                Log In
-              </Link>
-              <Link
-                href="/auth/signup"
-                className="bg-[#5B48FC] text-white px-5 py-2.5 rounded-full text-sm font-bold hover:bg-[#4A38E0] hover:shadow-md transition-all active:scale-95"
-              >
-                Join
-              </Link>
+              {user ? (
+                <div className="relative">
+                  <button
+                    onClick={() => setMenuOpen((v) => !v)}
+                    className="text-sm font-semibold text-gray-700 hover:text-[#5B48FC] px-4 py-2 transition-colors"
+                  >
+                    {user.firstName || user.email}
+                  </button>
+                  {menuOpen && (
+                    <div className="absolute right-0 mt-2 w-44 bg-white border border-gray-200 rounded-xl shadow-lg py-2 z-50">
+                      <Link href="/user/profile" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Profile</Link>
+                      <Link href="/dashboard/customer" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">My dashboard</Link>
+                      <Link href="/settings/profile" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Settings</Link>
+                      <Link href="/notifications" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Notifications{unreadCount > 0 ? ` (${unreadCount})` : ""}</Link>
+                      <Link href="/addresses" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Addresses</Link>
+                      {user.roles?.includes("SELLER") ? (
+                        <Link href="/dashboard/seller" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Seller dashboard</Link>
+                      ) : (
+                        <Link href="/seller/onboarding" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Become a seller</Link>
+                      )}
+                      <Link href="/wallet" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Wallet</Link>
+                      <Link href="/dashboard/customer/orders" onClick={() => setMenuOpen(false)} className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">Orders</Link>
+                      <button
+                        onClick={async () => {
+                          if (!window.confirm("Are you sure you want to log out?")) return;
+                          setMenuOpen(false);
+                          await logout();
+                          router.push("/");
+                        }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                      >
+                        Log Out
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <Link
+                    href="/auth/login"
+                    className="text-sm font-semibold text-gray-700 hover:text-[#5B48FC] px-4 py-2 transition-colors"
+                  >
+                    Log In
+                  </Link>
+                  <Link
+                    href="/auth/signup"
+                    className="bg-[#5B48FC] text-white px-5 py-2.5 rounded-full text-sm font-bold hover:bg-[#4A38E0] hover:shadow-md transition-all active:scale-95"
+                  >
+                    Join
+                  </Link>
+                </>
+              )}
             </div>
 
             {/* Mobile Hamburger Menu (Shows instead of auth on mobile) */}

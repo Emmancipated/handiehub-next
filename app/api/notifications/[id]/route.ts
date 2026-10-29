@@ -38,7 +38,10 @@ export async function PATCH(
     return NextResponse.json({ notification: updated });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });

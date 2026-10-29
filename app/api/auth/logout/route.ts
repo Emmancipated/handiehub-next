@@ -1,35 +1,43 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db/prisma";
+import { cookies } from "next/headers";
 import { requireUserId } from "@/lib/auth/current-user";
+import { getRefreshCookieName, clearSessionCookie } from "@/lib/auth/session";
+import { hashToken } from "@/lib/auth/otp";
+import { revokeAllRefreshTokens } from "@/lib/auth/tokens";
+import { prisma } from "@/lib/db/prisma";
 
-export async function POST(req: Request) {
+/**
+ * Logout clears both cookies and revokes every refresh token for the user.
+ *
+ * The access token may already be expired, so we fall back to the refresh
+ * cookie to identify the user. An unauthenticated logout still clears the
+ * cookies, which keeps the endpoint idempotent.
+ */
+export async function POST() {
+  let userId: string | null = null;
+
   try {
-    const userId = await requireUserId();
-
-    // Invalidate any stored refresh token so it can't be reused.
-    await prisma.user.update({
-      where: { id: userId },
-      data: {
-        refreshTokenHash: null,
-        refreshTokenExpires: null,
-        refreshTokenFamily: null,
-      },
-    });
+    userId = await requireUserId();
   } catch {
-    // Even if the user is not authenticated, still clear the cookie.
+    const refreshToken = (await cookies()).get(getRefreshCookieName())?.value;
+    if (refreshToken) {
+      const stored = await prisma.refreshToken.findUnique({
+        where: { tokenHash: hashToken(refreshToken) },
+        select: { userId: true },
+      });
+      userId = stored?.userId ?? null;
+    }
+  }
+
+  try {
+    if (userId) {
+      await revokeAllRefreshTokens(userId);
+    }
+  } catch (error) {
+    console.error("Logout token revocation error:", error);
   }
 
   const res = NextResponse.json({ message: "Logged out successfully" });
-  res.cookies.set(
-    process.env.AUTH_COOKIE_NAME || "hh_session",
-    "",
-    {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-      expires: new Date(0),
-      secure: process.env.NODE_ENV === "production",
-    },
-  );
+  clearSessionCookie(res);
   return res;
 }

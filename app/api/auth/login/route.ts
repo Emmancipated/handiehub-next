@@ -1,24 +1,58 @@
 import { NextResponse } from "next/server";
-import crypto from "crypto";
 import { z } from "zod";
 import { prisma } from "@/lib/db/prisma";
-import { signJwt, REFRESH_TTL_MS } from "@/lib/auth/jwt";
+import { signJwt } from "@/lib/auth/jwt";
 import { setSessionCookie } from "@/lib/auth/session";
 import { comparePassword } from "@/lib/auth/password";
+import { emailSchema } from "@/lib/auth/normalize";
+import { issueVerificationOtp } from "@/lib/auth/verification";
+import { issueRefreshToken } from "@/lib/auth/tokens";
+import {
+  rateLimit,
+  clearRateLimit,
+  getClientIp,
+} from "@/lib/security/rateLimit";
+import type { RateLimitResult } from "@/lib/security/rateLimit";
 
 const loginSchema = z.object({
-  email: z.string().email("Invalid email address"),
+  email: emailSchema,
   password: z.string().min(1, "Password is required"),
 });
 
-function hashToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
+// Abuse protection against credential stuffing / brute force.
+const EMAIL_LIMIT = { limit: 10, windowMs: 15 * 60 * 1000 };
+const IP_LIMIT = { limit: 30, windowMs: 15 * 60 * 1000 };
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const data = loginSchema.parse(body);
+
+    const emailKey = `login:email:${data.email}`;
+    const ip = getClientIp(req);
+    const ipKey = ip ? `login:ip:${ip}` : null;
+
+    const checks: Promise<RateLimitResult>[] = [
+      rateLimit(emailKey, EMAIL_LIMIT),
+    ];
+    if (ipKey) {
+      checks.push(rateLimit(ipKey, IP_LIMIT));
+    }
+    const limits = await Promise.all(checks);
+
+    if (limits.some((l) => !l.allowed)) {
+      return NextResponse.json(
+        { error: "Too many login attempts. Please try again later." },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(
+              Math.max(...limits.map((l) => l.retryAfterSeconds)),
+            ),
+          },
+        },
+      );
+    }
 
     const user = await prisma.user.findUnique({
       where: { email: data.email },
@@ -31,28 +65,35 @@ export async function POST(req: Request) {
       );
     }
 
-    const refreshToken = crypto.randomBytes(64).toString("hex");
-    const refreshTokenHash = hashToken(refreshToken);
-    const refreshTokenExpires = new Date(Date.now() + REFRESH_TTL_MS);
-    const refreshTokenFamily = crypto.randomUUID();
+    // Parity with the trusted Nest flow: unverified users cannot sign in.
+    // Send a fresh code so the verification screen can be used immediately.
+    if (!user.emailVerifiedAt) {
+      await issueVerificationOtp(user);
+      return NextResponse.json(
+        {
+          error: "Please verify your email address to continue.",
+          code: "EMAIL_NOT_VERIFIED",
+          requiresVerification: true,
+          email: user.email,
+        },
+        { status: 403 },
+      );
+    }
 
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        refreshTokenHash,
-        refreshTokenExpires,
-        refreshTokenFamily,
-      },
+    // Successful login clears the per-account counter so a few typos don't lock
+    // the user out. The per-IP counter is left to decay on its own.
+    await clearRateLimit(emailKey);
+
+    const refresh = await issueRefreshToken(user.id, undefined, {
+      userAgent: req.headers.get("user-agent"),
+      ip,
     });
 
-    const accessToken = signJwt(
-      {
-        sub: user.id,
-        email: user.email,
-        roles: user.roles,
-      },
-      "7d",
-    );
+    const accessToken = signJwt({
+      sub: user.id,
+      email: user.email,
+      roles: user.roles,
+    });
 
     const res = NextResponse.json({
       user: {
@@ -61,14 +102,11 @@ export async function POST(req: Request) {
         firstName: user.firstName,
         lastName: user.lastName,
         roles: user.roles,
-        emailVerified: user.emailVerifiedAt ? true : false,
+        emailVerified: true,
       },
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      refresh_token_expires: refreshTokenExpires.toISOString(),
     });
 
-    setSessionCookie(res, accessToken, refreshToken, refreshTokenExpires);
+    setSessionCookie(res, accessToken, refresh.token, refresh.expiresAt);
     return res;
   } catch (error) {
     if (error instanceof z.ZodError) {

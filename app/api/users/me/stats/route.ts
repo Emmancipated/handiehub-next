@@ -76,7 +76,10 @@ export async function GET() {
     return NextResponse.json({ stats });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }

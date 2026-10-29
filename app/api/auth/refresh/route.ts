@@ -1,76 +1,126 @@
 import { NextResponse } from "next/server";
-import crypto from "crypto";
+import { cookies } from "next/headers";
 import { z } from "zod";
 import { prisma } from "@/lib/db/prisma";
-import { signJwt, REFRESH_TTL_MS } from "@/lib/auth/jwt";
-import { setSessionCookie } from "@/lib/auth/session";
+import { signJwt } from "@/lib/auth/jwt";
+import {
+  getRefreshCookieName,
+  setSessionCookie,
+} from "@/lib/auth/session";
+import { hashToken } from "@/lib/auth/otp";
+import {
+  pruneExpiredRefreshTokens,
+  revokeRefreshFamily,
+  rotateRefreshToken,
+} from "@/lib/auth/tokens";
 
 const refreshSchema = z.object({
-  refreshToken: z.string().min(1, "Refresh token is required"),
+  refreshToken: z.string().min(1).optional(),
 });
 
-function hashToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
-
 /**
- * Refresh-token rotation.
+ * Refresh-token rotation with reuse detection.
  *
- * The currently-stored refresh-token hash is the only valid token for this
- * session. When a token is used we immediately rotate to a brand-new token,
- * so a stolen token can never be reused after the legitimate client rotates.
+ * Every login starts a token family. On refresh the old token is revoked and
+ * replaced atomically. If a revoked token is presented again, the whole family
+ * is revoked: either the old token was stolen or the client is replaying it.
  */
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
+    const body = await req.json().catch(() => ({}));
     const data = refreshSchema.parse(body);
 
-    const tokenHash = hashToken(data.refreshToken);
+    const cookieToken = (await cookies()).get(getRefreshCookieName())?.value;
+    const token = data.refreshToken ?? cookieToken;
 
-    const user = await prisma.user.findFirst({
-      where: {
-        refreshTokenHash: tokenHash,
-        refreshTokenExpires: { gt: new Date() },
-      },
-    });
-
-    if (!user) {
+    if (!token) {
       return NextResponse.json(
-        { error: "Invalid or expired refresh token" },
+        { error: "Refresh token is required", code: "REFRESH_TOKEN_MISSING" },
         { status: 401 },
       );
     }
 
-    const newRefreshToken = crypto.randomBytes(64).toString("hex");
-    const newRefreshTokenHash = hashToken(newRefreshToken);
-    const newExpires = new Date(Date.now() + REFRESH_TTL_MS);
-    const newFamily = crypto.randomUUID();
-
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        refreshTokenHash: newRefreshTokenHash,
-        refreshTokenExpires: newExpires,
-        refreshTokenFamily: newFamily,
-      },
+    const stored = await prisma.refreshToken.findUnique({
+      where: { tokenHash: hashToken(token) },
+      include: { user: true },
     });
 
-    const accessToken = signJwt(
-      {
-        sub: user.id,
-        email: user.email,
-        roles: user.roles,
-      },
-      "7d",
-    );
+    if (!stored) {
+      return NextResponse.json(
+        { error: "Invalid or expired refresh token", code: "INVALID_REFRESH_TOKEN" },
+        { status: 401 },
+      );
+    }
+
+    // Reuse of an already-rotated token invalidates the entire family. A short
+    // grace window avoids logging the user out when two tabs refresh at the
+    // same moment; the losing request retries with the winner's new cookie.
+    if (stored.revokedAt) {
+      const revokedAgoMs = Date.now() - stored.revokedAt.getTime();
+      if (revokedAgoMs < 30_000) {
+        return NextResponse.json(
+          {
+            error: "Another refresh is in progress",
+            code: "REFRESH_IN_PROGRESS",
+          },
+          { status: 401 },
+        );
+      }
+
+      await revokeRefreshFamily(stored.familyId);
+      return NextResponse.json(
+        { error: "Refresh token has already been used", code: "REFRESH_TOKEN_REUSED" },
+        { status: 401 },
+      );
+    }
+
+    if (stored.expiresAt <= new Date()) {
+      await prisma.refreshToken.delete({ where: { id: stored.id } });
+      return NextResponse.json(
+        { error: "Refresh token expired", code: "REFRESH_TOKEN_EXPIRED" },
+        { status: 401 },
+      );
+    }
+
+    if (!stored.user.emailVerifiedAt) {
+      await revokeRefreshFamily(stored.familyId);
+      return NextResponse.json(
+        {
+          error: "Please verify your email address to continue",
+          code: "EMAIL_NOT_VERIFIED",
+        },
+        { status: 403 },
+      );
+    }
+
+    const rotated = await rotateRefreshToken(stored, {
+      userAgent: req.headers.get("user-agent"),
+      ip: stored.ip,
+    });
+
+    const accessToken = signJwt({
+      sub: stored.user.id,
+      email: stored.user.email,
+      roles: stored.user.roles,
+    });
 
     const res = NextResponse.json({
-      access_token: accessToken,
-      refresh_token: newRefreshToken,
-      refresh_token_expires: newExpires.toISOString(),
+      user: {
+        id: stored.user.id,
+        email: stored.user.email,
+        firstName: stored.user.firstName,
+        lastName: stored.user.lastName,
+        roles: stored.user.roles,
+        emailVerified: true,
+      },
     });
 
-    setSessionCookie(res, accessToken, newRefreshToken, newExpires);
+    setSessionCookie(res, accessToken, rotated.token, rotated.expiresAt);
+
+    void pruneExpiredRefreshTokens().catch(() => {
+      /* best-effort cleanup */
+    });
+
     return res;
   } catch (error) {
     if (error instanceof z.ZodError) {

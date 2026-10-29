@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
-import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
+import { toJsonPayload } from "@/lib/http/toJsonPayload";
 
 const sellerListingsQuerySchema = z.object({
   page: z.coerce.number().min(1).default(1),
@@ -14,21 +13,19 @@ export async function GET(
   { params }: { params: Promise<{ sellerId: string }> },
 ) {
   try {
-    await requireUserId();
-
     const { sellerId } = await params;
 
     const { searchParams } = new URL(req.url);
     const parsed = sellerListingsQuerySchema.parse({
-      page: searchParams.get("page"),
-      limit: searchParams.get("limit"),
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
     });
 
     const { page, limit } = parsed;
 
     const seller = await prisma.user.findUnique({
       where: { id: sellerId },
-      select: { id: true, firstName: true, lastName: true, email: true, roles: true },
+      select: { id: true, firstName: true, lastName: true, roles: true },
     });
     if (!seller) {
       return NextResponse.json({ error: "Seller not found" }, { status: 404 });
@@ -53,15 +50,14 @@ export async function GET(
       prisma.listing.count({ where }),
     ]);
 
-    return NextResponse.json({
-      seller,
-      listings,
-      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-    });
+    return NextResponse.json(
+      toJsonPayload({
+        seller,
+        listings,
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      }),
+    );
   } catch (error) {
-    if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
     }

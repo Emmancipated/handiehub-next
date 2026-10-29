@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
+import { requireVerifiedUser } from "@/lib/auth/current-user";
 import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
@@ -21,7 +21,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const userId = await requireUserId();
+    const userId = await requireVerifiedUser();
 
     const { id } = await params;
 
@@ -62,7 +62,10 @@ export async function PATCH(
     return NextResponse.json({ address: updated });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
@@ -76,7 +79,7 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const userId = await requireUserId();
+    const userId = await requireVerifiedUser();
 
     const { id } = await params;
 
@@ -94,7 +97,10 @@ export async function DELETE(
     return NextResponse.json({ message: "Address deleted" });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }

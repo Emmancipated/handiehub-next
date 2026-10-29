@@ -25,8 +25,8 @@ export async function GET(req: Request) {
 
     const { searchParams } = new URL(req.url);
     const parsed = walletHistorySchema.parse({
-      page: searchParams.get("page"),
-      limit: searchParams.get("limit"),
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
       kind: searchParams.get("kind"),
       direction: searchParams.get("direction"),
     });
@@ -63,7 +63,10 @@ export async function GET(req: Request) {
     });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });

@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
-import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
 
@@ -10,39 +8,48 @@ const featuredQuerySchema = z.object({
 
 export async function GET(req: Request) {
   try {
-    await requireUserId();
-
     const { searchParams } = new URL(req.url);
     const parsed = featuredQuerySchema.parse({
-      limit: searchParams.get("limit"),
+      limit: searchParams.get("limit") ?? undefined,
     });
 
     const { limit } = parsed;
 
-    const categories = await prisma.category.findMany({
-      where: {
-        listings: {
-          some: { status: "ACTIVE" },
+    const [categories, kindGroups] = await Promise.all([
+      prisma.category.findMany({
+        where: { parentId: null },
+        include: {
+          children: { select: { id: true, slug: true, name: true } },
         },
-      },
-      orderBy: {
-        listings: {
-          _count: "desc",
-        },
-      },
-      take: limit,
-      include: {
-        _count: {
-          select: { listings: { where: { status: "ACTIVE" } } },
-        },
-      },
-    });
+      }),
+      prisma.listing.groupBy({
+        by: ["categoryId"],
+        where: { status: "ACTIVE" },
+        _count: { _all: true },
+      }),
+    ]);
 
-    return NextResponse.json({ categories });
-  } catch (error) {
-    if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const counts = new Map<string, number>();
+    for (const group of kindGroups) {
+      counts.set(group.categoryId, group._count._all);
     }
+
+    const data = categories
+      .map((category) => {
+        const listings =
+          (counts.get(category.id) ?? 0) +
+          category.children.reduce(
+            (sum, child) => sum + (counts.get(child.id) ?? 0),
+            0,
+          );
+        return { ...category, _count: { listings } };
+      })
+      .filter((category) => category._count.listings > 0)
+      .sort((a, b) => b._count.listings - a._count.listings)
+      .slice(0, limit);
+
+    return NextResponse.json({ categories: data });
+  } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
     }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
+import { requireUserId, requireVerifiedUser } from "@/lib/auth/current-user";
 import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
@@ -36,7 +36,10 @@ export async function GET() {
     return NextResponse.json({ user });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
@@ -44,7 +47,7 @@ export async function GET() {
 
 export async function PATCH(req: Request) {
   try {
-    const userId = await requireUserId();
+    const userId = await requireVerifiedUser();
 
     const body = await req.json();
     const data = updateProfileSchema.parse(body);
@@ -71,7 +74,10 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ user, message: "Profile updated successfully" });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });

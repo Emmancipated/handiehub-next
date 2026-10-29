@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
+import { requireUserId, requireVerifiedUser } from "@/lib/auth/current-user";
 import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
@@ -22,9 +22,9 @@ export async function GET(req: Request) {
 
     const { searchParams } = new URL(req.url);
     const parsed = messagesQuerySchema.parse({
-      page: searchParams.get("page"),
-      limit: searchParams.get("limit"),
-      conversationId: searchParams.get("conversationId"),
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
+      conversationId: searchParams.get("conversationId") ?? undefined,
     });
 
     const { page, limit, conversationId } = parsed;
@@ -34,7 +34,7 @@ export async function GET(req: Request) {
     };
     if (conversationId) where.conversationId = conversationId;
 
-    const [messages, total] = await Promise.all([
+    const [messages, total, unreadCount] = await Promise.all([
       prisma.message.findMany({
         where,
         orderBy: { createdAt: "desc" },
@@ -46,15 +46,22 @@ export async function GET(req: Request) {
         },
       }),
       prisma.message.count({ where }),
+      prisma.message.count({
+        where: { recipientId: userId, isRead: false },
+      }),
     ]);
 
     return NextResponse.json({
       messages,
+      unreadCount,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
@@ -65,7 +72,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const senderId = await requireUserId();
+    const senderId = await requireVerifiedUser();
 
     const body = await req.json();
     const data = sendMessageSchema.parse(body);
@@ -98,7 +105,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ message }, { status: 201 });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
