@@ -50,6 +50,7 @@ jest.mock("@/lib/security/rateLimit", () => ({
 const { POST: signupPost } = require("@/api/auth/signup/route");
 const { hashPassword } = require("@/lib/auth/password");
 const { rateLimit } = require("@/lib/security/rateLimit");
+const { sendOtpEmail } = require("@/lib/email/sendOtpEmail");
 
 function makeRequest(body: Record<string, unknown>) {
   return {
@@ -155,6 +156,46 @@ describe("POST /api/auth/signup", () => {
         data: expect.objectContaining({ roles: ["SELLER"] }),
       }),
     );
+  });
+
+  it("waits for verification email delivery before responding", async () => {
+    mockUser.findUnique.mockResolvedValue(null);
+    mockUser.create.mockResolvedValue({
+      id: "user_3",
+      email: "pending@example.com",
+      firstName: "Pending",
+      lastName: "User",
+      roles: ["CUSTOMER"],
+    });
+    mockUser.update.mockResolvedValue({});
+
+    let finishEmailSend;
+    sendOtpEmail.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishEmailSend = resolve;
+        }),
+    );
+
+    let responseReceived = false;
+    const responsePromise = signupPost(
+      makeRequest({
+        email: "pending@example.com",
+        password: "SecurePass123!",
+        firstName: "Pending",
+        lastName: "User",
+      }),
+    ).then((response) => {
+      responseReceived = true;
+      return response;
+    });
+
+    await new Promise(setImmediate);
+    expect(sendOtpEmail).toHaveBeenCalled();
+    expect(responseReceived).toBe(false);
+
+    finishEmailSend(true);
+    await expect(responsePromise).resolves.toMatchObject({ status: 201 });
   });
 
   it("returns 409 if email already exists", async () => {
