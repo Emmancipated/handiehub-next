@@ -19,6 +19,7 @@ const myOrdersQuerySchema = z.object({
     "DISPUTED",
     "REFUNDED",
   ]).nullable(),
+  kind: z.enum(["PRODUCT", "SERVICE"]).nullable(),
 });
 
 export async function GET(req: Request) {
@@ -27,15 +28,17 @@ export async function GET(req: Request) {
 
     const { searchParams } = new URL(req.url);
     const parsed = myOrdersQuerySchema.parse({
-      page: searchParams.get("page"),
-      limit: searchParams.get("limit"),
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
       status: searchParams.get("status"),
+      kind: searchParams.get("kind"),
     });
 
-    const { page, limit, status } = parsed;
+    const { page, limit, status, kind } = parsed;
 
     const where: Record<string, unknown> = { buyerId };
     if (status) where.status = status;
+    if (kind) where.items = { some: { listing: { kind } } };
 
     const [orders, total] = await Promise.all([
       prisma.order.findMany({
@@ -44,7 +47,11 @@ export async function GET(req: Request) {
         skip: (page - 1) * limit,
         take: limit,
         include: {
-          items: true,
+          items: {
+            include: {
+              listing: { select: { kind: true, slug: true } },
+            },
+          },
           payments: { select: { id: true, status: true, amountMinor: true, providerReference: true } },
           seller: { select: { id: true, firstName: true, lastName: true, email: true } },
           review: true,
@@ -59,7 +66,10 @@ export async function GET(req: Request) {
     });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });

@@ -19,7 +19,8 @@ type SendPasswordResetOtpParams = {
   expiresInMinutes: number;
 };
 
-const from = process.env.MAIL_SENDER_DEFAULT || "HandieHub <onboarding@resend.dev>";
+const from =
+  process.env.MAIL_SENDER_DEFAULT || "HandieHub <onboarding@resend.dev>";
 
 async function resendSend(params: SendEmailParams): Promise<boolean> {
   const apiKey = process.env.RESEND_API_KEY;
@@ -31,10 +32,23 @@ async function resendSend(params: SendEmailParams): Promise<boolean> {
   // Lazy import so the module loads even when the `resend` package is absent
   // (e.g. in Jest's CommonJS resolver, which can't resolve the package's
   // ESM `.mjs` entry). At runtime in Node/Next the dynamic import resolves.
-  let ResendCtor: any;
+  let ResendCtor: new (apiKey: string) => {
+    emails: {
+      send: (params: {
+        from: string;
+        to: string;
+        subject: string;
+        html: string;
+        text: string;
+      }) => Promise<{ error?: unknown }>;
+    };
+  };
   try {
-    const mod = (await import("resend" /* @vite-ignore */)) as any;
-    ResendCtor = mod.Resend ?? mod.default;
+    const mod = (await import("resend" /* @vite-ignore */)) as unknown as {
+      Resend?: typeof ResendCtor;
+      default?: typeof ResendCtor;
+    };
+    ResendCtor = (mod.Resend ?? mod.default) as typeof ResendCtor;
   } catch (err) {
     console.error("[email] Failed to load resend package:", err);
     return false;
@@ -54,6 +68,7 @@ async function resendSend(params: SendEmailParams): Promise<boolean> {
       console.error("[email] Resend error:", error);
       return false;
     }
+    console.log("[email] Sent email to", params.to, "subject:", params.subject);
     return true;
   } catch (err) {
     console.error("[email] Failed to send:", err);

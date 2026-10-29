@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
-import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
+import { toJsonPayload } from "@/lib/http/toJsonPayload";
 
 const relatedQuerySchema = z.object({
   limit: z.coerce.number().min(1).max(50).default(4),
@@ -13,13 +12,11 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    await requireUserId();
-
     const { id } = await params;
 
     const { searchParams } = new URL(req.url);
     const parsed = relatedQuerySchema.parse({
-      limit: searchParams.get("limit"),
+      limit: searchParams.get("limit") ?? undefined,
     });
 
     const { limit } = parsed;
@@ -47,11 +44,8 @@ export async function GET(
       },
     });
 
-    return NextResponse.json({ related });
+    return NextResponse.json(toJsonPayload({ related }));
   } catch (error) {
-    if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
     }

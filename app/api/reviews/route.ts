@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireUserId } from "@/lib/auth/current-user";
+import { requireVerifiedUser } from "@/lib/auth/current-user";
 import { AuthError } from "@/lib/auth/current-user";
 import { prisma } from "@/lib/db/prisma";
 import { z } from "zod";
@@ -21,7 +21,7 @@ const reviewsQuerySchema = z.object({
 
 export async function POST(req: Request) {
   try {
-    const authorId = await requireUserId();
+    const authorId = await requireVerifiedUser();
 
     const body = await req.json();
     const data = createReviewSchema.parse(body);
@@ -83,7 +83,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ review }, { status: 201 });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });
@@ -94,14 +97,12 @@ export async function POST(req: Request) {
 
 export async function GET(req: Request) {
   try {
-    await requireUserId();
-
     const { searchParams } = new URL(req.url);
     const parsed = reviewsQuerySchema.parse({
-      page: searchParams.get("page"),
-      limit: searchParams.get("limit"),
-      listingId: searchParams.get("listingId"),
-      sellerId: searchParams.get("sellerId"),
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
+      listingId: searchParams.get("listingId") ?? undefined,
+      sellerId: searchParams.get("sellerId") ?? undefined,
     });
 
     const { page, limit, listingId, sellerId } = parsed;
@@ -131,7 +132,10 @@ export async function GET(req: Request) {
     });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });

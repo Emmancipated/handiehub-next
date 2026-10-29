@@ -27,8 +27,8 @@ export async function GET(req: Request) {
 
     const { searchParams } = new URL(req.url);
     const parsed = escrowQuerySchema.parse({
-      page: searchParams.get("page"),
-      limit: searchParams.get("limit"),
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
       status: searchParams.get("status"),
     });
 
@@ -64,7 +64,10 @@ export async function GET(req: Request) {
     });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Validation failed", issues: error.issues }, { status: 400 });

@@ -1,31 +1,69 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import crypto from "crypto";
 import { prisma } from "@/lib/db/prisma";
-import { signJwt, REFRESH_TTL_MS } from "@/lib/auth/jwt";
-import { setSessionCookie } from "@/lib/auth/session";
-import { hashPassword } from "@/lib/auth/password";
-import { sendOtpEmail } from "@/lib/email/sendOtpEmail";
-import { generateOtp } from "@/lib/auth/otp";
+import { hashPassword, passwordSchema } from "@/lib/auth/password";
+import { issueVerificationOtp } from "@/lib/auth/verification";
+import { emailSchema } from "@/lib/auth/normalize";
+import { rateLimit, getClientIp } from "@/lib/security/rateLimit";
+import type { RateLimitResult } from "@/lib/security/rateLimit";
+
+const accountTypeSchema = z
+  .enum(["buyer", "seller", "user", "handieman"])
+  .optional();
 
 const signupSchema = z.object({
-  email: z.string().email("Invalid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
-  firstName: z.string().min(1, "First name is required"),
-  lastName: z.string().min(1, "Last name is required"),
-  phone: z.string().optional(),
+  email: emailSchema,
+  password: passwordSchema,
+  firstName: z.string().min(1, "First name is required").max(100),
+  lastName: z.string().min(1, "Last name is required").max(100),
+  phone: z.string().max(32).optional(),
+  // The UI sends `role`; `accountType` is accepted for API clients.
+  accountType: accountTypeSchema,
+  role: accountTypeSchema,
 });
 
-function hashToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
+type SignupInput = z.infer<typeof signupSchema>;
+
+function resolveRole(input: SignupInput): "CUSTOMER" | "SELLER" {
+  const value = input.accountType ?? input.role;
+  return value === "seller" || value === "handieman" ? "SELLER" : "CUSTOMER";
 }
+
+// Abuse protection against scripted account creation / verification-email spam.
+const EMAIL_LIMIT = { limit: 5, windowMs: 15 * 60 * 1000 };
+const IP_LIMIT = { limit: 10, windowMs: 15 * 60 * 1000 };
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const data = signupSchema.parse(body);
 
-    const existing = await prisma.user.findUnique({ where: { email: data.email } });
+    const checks: Promise<RateLimitResult>[] = [
+      rateLimit(`signup:email:${data.email}`, EMAIL_LIMIT),
+    ];
+    const ip = getClientIp(req);
+    if (ip) {
+      checks.push(rateLimit(`signup:ip:${ip}`, IP_LIMIT));
+    }
+    const limits = await Promise.all(checks);
+
+    if (limits.some((l) => !l.allowed)) {
+      return NextResponse.json(
+        { error: "Too many signup attempts. Please try again later." },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(
+              Math.max(...limits.map((l) => l.retryAfterSeconds)),
+            ),
+          },
+        },
+      );
+    }
+
+    const existing = await prisma.user.findUnique({
+      where: { email: data.email },
+    });
     if (existing) {
       return NextResponse.json(
         { error: "Email already registered" },
@@ -34,6 +72,7 @@ export async function POST(req: Request) {
     }
 
     const passwordHash = await hashPassword(data.password);
+    const role = resolveRole(data);
 
     const user = await prisma.user.create({
       data: {
@@ -42,54 +81,17 @@ export async function POST(req: Request) {
         firstName: data.firstName,
         lastName: data.lastName,
         phone: data.phone ?? null,
-        roles: ["CUSTOMER"],
+        roles: [role],
       },
     });
 
-    // Issue access + refresh tokens so the user is logged in immediately.
-    const refreshToken = crypto.randomBytes(64).toString("hex");
-    const refreshTokenHash = hashToken(refreshToken);
-    const refreshTokenExpires = new Date(Date.now() + REFRESH_TTL_MS);
-    const refreshTokenFamily = crypto.randomUUID();
+    // Store the OTP before responding so an immediate verify cannot race the
+    // write. Email delivery stays non-blocking.
+    await issueVerificationOtp(user);
 
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        refreshTokenHash,
-        refreshTokenExpires,
-        refreshTokenFamily,
-      },
-    });
-
-    const accessToken = signJwt(
-      {
-        sub: user.id,
-        email: user.email,
-        roles: user.roles,
-      },
-      "7d",
-    );
-
-    // Send verification OTP (fire-and-forget, non-blocking).
-    const otp = generateOtp();
-    const otpHash = hashToken(otp);
-    const otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    prisma.user
-      .update({
-        where: { id: user.id },
-        data: { otpHash, otpExpiresAt },
-      })
-      .then(() =>
-        sendOtpEmail({
-          toEmail: user.email,
-          firstName: user.firstName,
-          otp,
-          expiresInMinutes: 15,
-        }),
-      )
-      .catch((err) => console.error("Failed to send verification OTP:", err));
-
-    const res = NextResponse.json(
+    // Signup deliberately does not create a session: the user must verify
+    // their email first. Verification issues the session.
+    return NextResponse.json(
       {
         user: {
           id: user.id,
@@ -99,15 +101,10 @@ export async function POST(req: Request) {
           roles: user.roles,
           emailVerified: false,
         },
-        access_token: accessToken,
-        refresh_token: refreshToken,
-        refresh_token_expires: refreshTokenExpires.toISOString(),
+        requiresVerification: true,
       },
       { status: 201 },
     );
-
-    setSessionCookie(res, accessToken, refreshToken, refreshTokenExpires);
-    return res;
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(

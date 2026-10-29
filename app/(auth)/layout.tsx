@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Sparkles, ShieldCheck, Star } from "lucide-react";
+import { ShieldCheck, Star } from "lucide-react";
 
 export default function AuthGroupLayout({
   children,

@@ -5,8 +5,7 @@ import { prisma } from "@/lib/db/prisma";
 function isAuthError(error: unknown): boolean {
   return (
     error instanceof Error &&
-    (error.message.includes("AuthError") ||
-      (error as any).status === 401 ||
+    ((error as { status?: number }).status === 401 ||
       error.name === "AuthError")
   );
 }
@@ -45,13 +44,10 @@ export async function GET() {
     return NextResponse.json({
       user: {
         ...user,
-        emailVerified: user.emailVerifiedAt ? true : false,
+        emailVerified: Boolean(user.emailVerifiedAt),
       },
     });
   } catch (error) {
-    if (isAuthError(error)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
     console.error("Get profile error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
