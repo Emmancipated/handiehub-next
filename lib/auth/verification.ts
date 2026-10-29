@@ -10,8 +10,8 @@ type VerificationUser = {
 
 /**
  * Generate a new email-verification OTP, persist its hash and deliver it.
- * The database write is awaited so a verify request cannot race it; email
- * delivery is intentionally non-blocking.
+ * The database write and email delivery are awaited so a verify request
+ * cannot race the OTP write and serverless execution cannot end before send.
  */
 export async function issueVerificationOtp(
   user: VerificationUser,
@@ -26,10 +26,16 @@ export async function issueVerificationOtp(
     },
   });
 
-  void sendOtpEmail({
+  const sent = await sendOtpEmail({
     toEmail: user.email,
     firstName: user.firstName,
     otp,
     expiresInMinutes: OTP_TTL_MINUTES,
-  }).catch((err) => console.error("Failed to send verification OTP:", err));
+  });
+
+  if (!sent) {
+    console.error(
+      `[auth] Verification email was NOT sent to ${user.email}. Check RESEND_API_KEY and MAIL_SENDER_DEFAULT.`,
+    );
+  }
 }
